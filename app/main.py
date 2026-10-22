@@ -211,9 +211,18 @@ async def _process_and_reply(request: Request, message) -> JSONResponse | dict:
         return JSONResponse(status_code=503, content={"error": "Service not ready"})
 
     created_at = _utc_now_iso()
-    reply = await router.route(message)
+    from app.flow import handle_message
+
+    reply, voice_lang = await handle_message(router, whatsapp, message)
     responded_at = _utc_now_iso()
     await whatsapp.send_text(message.from_number, reply)
+    if voice_lang and hasattr(whatsapp, "send_audio_bytes"):
+        try:
+            from app.tts import synthesize
+
+            await whatsapp.send_audio_bytes(message.from_number, await synthesize(reply, voice_lang))
+        except Exception as e:  # voice is a bonus; text already sent
+            logger.warning("Webhook: voice reply failed: %s", e)
     _persist_conversation(request, message, reply, created_at, responded_at)
     return {"status": "ok"}
 

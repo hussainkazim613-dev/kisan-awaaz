@@ -38,9 +38,12 @@ class VoicePipeline:
             len(audio_bytes),
         )
 
+        from app.flow import LANGUAGES, current_language
+
+        whisper_lang = LANGUAGES.get(current_language.get(), {}).get("whisper", self._language)
         try:
             transcription = await self._speech.transcribe(
-                audio_bytes, language=self._language
+                audio_bytes, language=whisper_lang
             )
         except PipelineError:
             raise

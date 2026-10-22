@@ -69,6 +69,32 @@ class MetaWhatsAppAdapter(WhatsAppAdapter):
         }
         await self._post_message(to, payload)
 
+    async def send_audio_bytes(self, to: str, audio: bytes, mime: str = "audio/mpeg") -> None:
+        """Upload audio to Meta, then send it by media id (no public URL needed)."""
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                up = await client.post(
+                    f"{self._base_url}/{self._phone_number_id}/media",
+                    headers={"Authorization": f"Bearer {self._access_token}"},
+                    data={"messaging_product": "whatsapp", "type": mime},
+                    files={"file": ("reply.mp3", audio, mime)},
+                )
+                up.raise_for_status()
+                media_id = up.json().get("id")
+        except httpx.HTTPStatusError as e:
+            raise AdapterError("Meta", f"Audio upload returned {e.response.status_code}: {e.response.text[:200]}")
+        except httpx.RequestError as e:
+            raise AdapterError("Meta", f"Audio upload failed: {e}")
+        if not media_id:
+            raise AdapterError("Meta", "Audio upload response missing 'id'")
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": self._normalize_to(to),
+            "type": "audio",
+            "audio": {"id": media_id},
+        }
+        await self._post_message(to, payload)
+
     async def _post_message(self, to: str, payload: dict) -> None:
         logger.info("MetaWhatsAppAdapter: sending message to=%s type=%s", to, payload.get("type"))
         try:

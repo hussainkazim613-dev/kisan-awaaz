@@ -49,6 +49,12 @@ class TextPipeline:
         if not text or not text.strip():
             raise ValidationError("Query text must not be empty")
 
+        from app.flow import OFF_TOPIC, is_farming_query
+
+        if vision_context is None and not is_farming_query(text):
+            logger.info("TextPipeline: off-topic query blocked (no LLM call)")
+            return OFF_TOPIC
+
         logger.info("TextPipeline: processing query (%d chars)", len(text))
 
         query = self._build_query(text, vision_context)

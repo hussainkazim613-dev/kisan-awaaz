@@ -34,6 +34,16 @@ class QwenLLMAdapter(LLMAdapter):
         self._system_prompt = system_prompt
 
     async def generate(self, prompt: str, context: str = "") -> str:
+        from app.flow import LANGUAGES, current_crop, current_language
+
+        system_prompt = (
+            self._system_prompt
+            + f"\nReply ONLY in {LANGUAGES.get(current_language.get(), LANGUAGES['ur'])['name']}."
+            + " Keep it under 100 words, simple spoken style, no markdown or emojis."
+            + " Answer only farming and crop questions; politely refuse anything else."
+        )
+        if current_crop.get():
+            system_prompt += f"\nThe farmer grows: {current_crop.get()}."
         user_content = prompt
         if context:
             user_content = f"Retrieved knowledge passages:\n{context}\n\nFarmer question: {prompt}"
@@ -41,10 +51,10 @@ class QwenLLMAdapter(LLMAdapter):
         payload = {
             "model": self._model,
             "messages": [
-                {"role": "system", "content": self._system_prompt},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
             ],
-            "max_tokens": 1024,
+            "max_tokens": 400,
             "temperature": 0.3,
         }
 

@@ -1,0 +1,141 @@
+diff --git a/app/adapters/llm/qwen_adapter.py b/app/adapters/llm/qwen_adapter.py
+index 907cf6e..d2b8768 100644
+--- a/app/adapters/llm/qwen_adapter.py
++++ b/app/adapters/llm/qwen_adapter.py
+@@ -34,6 +34,16 @@ class QwenLLMAdapter(LLMAdapter):
+         self._system_prompt = system_prompt
+ 
+     async def generate(self, prompt: str, context: str = "") -> str:
++        from app.flow import LANGUAGES, current_crop, current_language
++
++        system_prompt = (
++            self._system_prompt
++            + f"\nReply ONLY in {LANGUAGES.get(current_language.get(), LANGUAGES['ur'])['name']}."
++            + " Keep it under 100 words, simple spoken style, no markdown or emojis."
++            + " Answer only farming and crop questions; politely refuse anything else."
++        )
++        if current_crop.get():
++            system_prompt += f"\nThe farmer grows: {current_crop.get()}."
+         user_content = prompt
+         if context:
+             user_content = f"Retrieved knowledge passages:\n{context}\n\nFarmer question: {prompt}"
+@@ -41,10 +51,10 @@ class QwenLLMAdapter(LLMAdapter):
+         payload = {
+             "model": self._model,
+             "messages": [
+-                {"role": "system", "content": self._system_prompt},
++                {"role": "system", "content": system_prompt},
+                 {"role": "user", "content": user_content},
+             ],
+-            "max_tokens": 1024,
++            "max_tokens": 400,
+             "temperature": 0.3,
+         }
+ 
+diff --git a/app/adapters/whatsapp/meta_adapter.py b/app/adapters/whatsapp/meta_adapter.py
+index 8bd5696..8bed75e 100644
+--- a/app/adapters/whatsapp/meta_adapter.py
++++ b/app/adapters/whatsapp/meta_adapter.py
+@@ -69,6 +69,32 @@ class MetaWhatsAppAdapter(WhatsAppAdapter):
+         }
+         await self._post_message(to, payload)
+ 
++    async def send_audio_bytes(self, to: str, audio: bytes, mime: str = "audio/mpeg") -> None:
++        """Upload audio to Meta, then send it by media id (no public URL needed)."""
++        try:
++            async with httpx.AsyncClient(timeout=self._timeout) as client:
++                up = await client.post(
++                    f"{self._base_url}/{self._phone_number_id}/media",
++                    headers={"Authorization": f"Bearer {self._access_token}"},
++                    data={"messaging_product": "whatsapp", "type": mime},
++                    files={"file": ("reply.mp3", audio, mime)},
++                )
++                up.raise_for_status()
++                media_id = up.json().get("id")
++        except httpx.HTTPStatusError as e:
++            raise AdapterError("Meta", f"Audio upload returned {e.response.status_code}: {e.response.text[:200]}")
++        except httpx.RequestError as e:
++            raise AdapterError("Meta", f"Audio upload failed: {e}")
++        if not media_id:
++            raise AdapterError("Meta", "Audio upload response missing 'id'")
++        payload = {
++            "messaging_product": "whatsapp",
++            "to": self._normalize_to(to),
++            "type": "audio",
++            "audio": {"id": media_id},
++        }
++        await self._post_message(to, payload)
++
+     async def _post_message(self, to: str, payload: dict) -> None:
+         logger.info("MetaWhatsAppAdapter: sending message to=%s type=%s", to, payload.get("type"))
+         try:
+diff --git a/app/main.py b/app/main.py
+index b8f35ea..ac1fa89 100644
+--- a/app/main.py
++++ b/app/main.py
+@@ -211,9 +211,18 @@ async def _process_and_reply(request: Request, message) -> JSONResponse | dict:
+         return JSONResponse(status_code=503, content={"error": "Service not ready"})
+ 
+     created_at = _utc_now_iso()
+-    reply = await router.route(message)
++    from app.flow import handle_message
++
++    reply, voice_lang = await handle_message(router, whatsapp, message)
+     responded_at = _utc_now_iso()
+     await whatsapp.send_text(message.from_number, reply)
++    if voice_lang and hasattr(whatsapp, "send_audio_bytes"):
++        try:
++            from app.tts import synthesize
++
++            await whatsapp.send_audio_bytes(message.from_number, await synthesize(reply, voice_lang))
++        except Exception as e:  # voice is a bonus; text already sent
++            logger.warning("Webhook: voice reply failed: %s", e)
+     _persist_conversation(request, message, reply, created_at, responded_at)
+     return {"status": "ok"}
+ 
+diff --git a/app/pipelines/text_pipeline.py b/app/pipelines/text_pipeline.py
+index 998ddf6..e6a0809 100644
+--- a/app/pipelines/text_pipeline.py
++++ b/app/pipelines/text_pipeline.py
+@@ -49,6 +49,12 @@ class TextPipeline:
+         if not text or not text.strip():
+             raise ValidationError("Query text must not be empty")
+ 
++        from app.flow import OFF_TOPIC, is_farming_query
++
++        if vision_context is None and not is_farming_query(text):
++            logger.info("TextPipeline: off-topic query blocked (no LLM call)")
++            return OFF_TOPIC
++
+         logger.info("TextPipeline: processing query (%d chars)", len(text))
+ 
+         query = self._build_query(text, vision_context)
+diff --git a/app/pipelines/voice_pipeline.py b/app/pipelines/voice_pipeline.py
+index 3225efa..91b37c1 100644
+--- a/app/pipelines/voice_pipeline.py
++++ b/app/pipelines/voice_pipeline.py
+@@ -38,9 +38,12 @@ class VoicePipeline:
+             len(audio_bytes),
+         )
+ 
++        from app.flow import LANGUAGES, current_language
++
++        whisper_lang = LANGUAGES.get(current_language.get(), {}).get("whisper", self._language)
+         try:
+             transcription = await self._speech.transcribe(
+-                audio_bytes, language=self._language
++                audio_bytes, language=whisper_lang
+             )
+         except PipelineError:
+             raise
+diff --git a/requirements.txt b/requirements.txt
+index fbeec11..3fdc115 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -13,3 +13,6 @@ sentence-transformers>=3.0
+ pytest==8.3.3
+ pytest-asyncio==0.24.0
+ httpx==0.27.2
++
++# Voice replies (free TTS)
++edge-tts>=6.1.12
