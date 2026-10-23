@@ -13,9 +13,8 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-# Override with SPEECH_API_URL to use any OpenAI-compatible endpoint (e.g. Groq free Whisper).
 OPENAI_AUDIO_URL = os.environ.get(
-    "SPEECH_API_URL", "https://api.openai.com/v1/audio/transcriptions"
+    "SPEECH_API_URL", "https://api.groq.com/openai/v1/audio/transcriptions"
 )
 
 FORMAT_EXTENSIONS = {
