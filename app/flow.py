@@ -88,6 +88,30 @@ def match_crop(text: str) -> str | None:
     return None
 
 
+TOPICS = {
+    "disease and pests": ["1", "bimari", "bemar", "bimar", "keera", "keray", "kiray", "disease", "pest",
+                          "بیماری", "بیمار", "کیڑا", "کیڑے", "سنڈی"],
+    "fertilizer": ["2", "khad", "khaad", "urea", "dap", "fertilizer", "fertiliser", "کھاد", "یوریا"],
+    "irrigation and water": ["3", "pani", "paani", "sinchai", "water", "irrigation", "پانی"],
+    "identifying a problem from a photo": ["4", "photo", "tasveer", "tasweer", "image", "picture", "تصویر", "فوٹو"],
+}
+GREETINGS = {"hi", "hello", "hey", "salam", "salaam", "assalam", "assalamualaikum", "aoa", "slam",
+             "سلام", "السلام", "علیکم", "ہیلو"}
+
+
+def match_topic(text: str) -> str | None:
+    toks = set(_tokens(text))
+    for name, aliases in TOPICS.items():
+        if any(a in toks for a in aliases):
+            return name
+    return None
+
+
+def is_greeting(text: str) -> bool:
+    toks = _tokens(text)
+    return bool(toks) and all(t in GREETINGS for t in toks)
+
+
 def is_farming_query(text: str) -> bool:
     toks = set(_tokens(text))
     if toks & AGRI_WORDS:
@@ -106,6 +130,12 @@ NOT_FARMER = (
     "کسان آواز صرف فصلوں اور کاشتکاری کے سوالات کے لیے ہے۔ "
     "اگر آپ کاشتکار ہیں تو اپنی فصل کا نام لکھیں یا بولیں۔"
 )
+TOPIC_Q = (
+    "آپ کو کس بارے میں مدد چاہیے؟ نمبر بھیجیں یا بولیں:\n"
+    "1️⃣ بیماری یا کیڑے\n2️⃣ کھاد\n3️⃣ پانی / آبپاشی\n4️⃣ بیمار پتے کی تصویر سے پہچان"
+)
+TOPIC_RETRY = "براہ کرم 1، 2، 3 یا 4 بھیجیں، یا بتائیں: بیماری، کھاد، پانی یا تصویر۔"
+LIMIT_MSG = "آج کے لیے آپ کے سوالات کی حد پوری ہو گئی ہے۔ کل دوبارہ پوچھیں۔ شکریہ!"
 READY_MSG = (
     "ٹھیک ہے! آپ کی فصل: {crop}۔\n"
     "اب فصل کی بیماری، کیڑوں، کھاد یا پانی کے بارے میں سوال پوچھیں، یا بیمار پتے کی تصویر بھیجیں۔\n"
@@ -118,14 +148,19 @@ OFF_TOPIC = (
 RESET_WORDS = {"زبان", "zaban", "language", "reset", "menu"}
 
 SESSION_TTL = 24 * 3600
+DAILY_LIMIT = 20
 
 
 @dataclass
 class Session:
-    state: str = "NEW"  # NEW -> ASK_LANG -> ASK_CROP -> READY
+    state: str = "NEW"  # NEW -> ASK_LANG -> ASK_CROP -> ASK_TOPIC -> READY
     lang: str = "ur"
     crop: str = ""
     fails: int = 0
+    topic: str = ""
+    strikes: int = 0  # off-topic strikes
+    day: str = ""
+    used: int = 0  # questions answered today
     last_seen: float = field(default_factory=time.time)
 
 
@@ -165,9 +200,24 @@ async def handle_message(router, whatsapp, message) -> tuple[str, str | None]:
         if not is_audio and text.lower() in RESET_WORDS:
             s.state, s.fails = "ASK_LANG", 0
             return LANG_MENU, None
+        if not is_audio and is_greeting(text):
+            return READY_MSG.format(crop=CROPS[s.crop][0]), None
+        today = time.strftime("%Y-%m-%d")
+        if s.day != today:
+            s.day, s.used = today, 0
+        if s.used >= DAILY_LIMIT:
+            return LIMIT_MSG, None
         current_language.set(s.lang)
-        current_crop.set(s.crop)
+        current_crop.set(f"{s.crop}; main concern: {s.topic}")
         reply = await router.route(message)
+        if reply == OFF_TOPIC:
+            s.strikes += 1
+            if s.strikes >= 3:  # not interested in farming: re-qualify, no more LLM calls
+                s.state, s.fails, s.strikes = "ASK_CROP", 0, 0
+                return NOT_FARMER, None
+        else:
+            s.used += 1
+            s.strikes = 0
         return reply, (s.lang if is_audio else None)
 
     voice = "ur" if is_audio else None
@@ -190,9 +240,18 @@ async def handle_message(router, whatsapp, message) -> tuple[str, str | None]:
         return CROP_Q, s.lang if is_audio else None
 
     # ASK_CROP: the farmer gate. No LLM call happens until a crop is named.
-    crop = match_crop(text)
-    if crop is None:
+    if s.state == "ASK_CROP":
+        crop = match_crop(text)
+        if crop is None:
+            s.fails += 1
+            return (CROP_RETRY if s.fails < 3 else NOT_FARMER), (s.lang if is_audio else None)
+        s.crop, s.state, s.fails = crop, "ASK_TOPIC", 0
+        return TOPIC_Q, (s.lang if is_audio else None)
+
+    # ASK_TOPIC
+    topic = match_topic(text)
+    if topic is None:
         s.fails += 1
-        return (CROP_RETRY if s.fails < 3 else NOT_FARMER), (s.lang if is_audio else None)
-    s.crop, s.state, s.fails = crop, "READY", 0
-    return READY_MSG.format(crop=CROPS[crop][0]), (s.lang if is_audio else None)
+        return (TOPIC_RETRY if s.fails < 3 else NOT_FARMER), (s.lang if is_audio else None)
+    s.topic, s.state, s.fails = topic, "READY", 0
+    return READY_MSG.format(crop=CROPS[s.crop][0]), (s.lang if is_audio else None)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import httpx
 
 from app.adapters.speech.audio_validator import validate_audio
@@ -11,7 +13,9 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-OPENAI_AUDIO_URL = "https://api.openai.com/v1/audio/transcriptions"
+OPENAI_AUDIO_URL = os.environ.get(
+    "SPEECH_API_URL", "https://api.groq.com/openai/v1/audio/transcriptions"
+)
 
 FORMAT_EXTENSIONS = {
     "ogg": "ogg",

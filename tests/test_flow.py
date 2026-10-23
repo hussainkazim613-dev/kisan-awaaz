@@ -29,7 +29,13 @@ def test_gate_and_flow():
     reply, _ = run(flow.handle_message(r, None, msg("burger banana hai")))
     assert reply == flow.CROP_RETRY and flow.SESSIONS["923001"].state == "ASK_CROP"
     reply, _ = run(flow.handle_message(r, None, msg("meri gandum ki fasal")))
-    assert flow.SESSIONS["923001"].state == "READY" and flow.SESSIONS["923001"].crop == "wheat"
+    assert flow.SESSIONS["923001"].state == "ASK_TOPIC" and flow.SESSIONS["923001"].crop == "wheat"
+    reply, _ = run(flow.handle_message(r, None, msg("burger")))
+    assert reply == flow.TOPIC_RETRY
+    reply, _ = run(flow.handle_message(r, None, msg("1")))
+    assert flow.SESSIONS["923001"].state == "READY"
+    reply, _ = run(flow.handle_message(r, None, msg("hi")))
+    assert "فصل" in reply and reply != "LLM-CALLED"
     reply, _ = run(flow.handle_message(r, None, msg("gandum mein keera hai")))
     assert reply == "LLM-CALLED"
     reply, _ = run(flow.handle_message(r, None, msg("زبان")))
@@ -42,3 +48,20 @@ def test_off_topic_guard():
     assert flow.is_farming_query("mera tamatar bemar hai")
     assert flow.is_farming_query("کپاس میں سنڈی لگ گئی ہے")
     assert flow.is_farming_query("wheat leaf yellow")
+
+
+def test_strikes_and_limit():
+    flow.SESSIONS.clear()
+
+    class Off(FakeRouter):
+        async def route(self, m):
+            return flow.OFF_TOPIC
+
+    s = flow._get_session("9230")
+    s.state, s.crop, s.topic = "READY", "wheat", "fertilizer"
+    for _ in range(3):
+        reply, _ = run(flow.handle_message(Off(), None, msg("burger", n="9230")))
+    assert reply == flow.NOT_FARMER and s.state == "ASK_CROP"
+    s.state, s.used, s.day = "READY", flow.DAILY_LIMIT, __import__("time").strftime("%Y-%m-%d")
+    reply, _ = run(flow.handle_message(FakeRouter(), None, msg("gandum khad", n="9230")))
+    assert reply == flow.LIMIT_MSG
